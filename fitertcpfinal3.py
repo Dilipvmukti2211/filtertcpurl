@@ -1,120 +1,195 @@
-from fastapi import FastAPI, Query, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, UploadFile, File, Query
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import List, Set
 import pathlib
-import io
 import csv
+import re
 
 BASE_PATH = pathlib.Path("/home/dilip/provisioning")
 
-app = FastAPI(
-    title="UUID → TCP URL Dashboard",
-    version="7.0"
-)
+app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-class Device(BaseModel):
-    uuid: str
-    tcp_url: str
-    source_file: str
-    line_number: int
+unmatched_data = []
 
 
-def search_uuids(uuids: Set[str]):
-    results: List[Device] = []
-    found: Set[str] = set()
+# -------- Extract middle number --------
+
+def extract_number(value):
+    m = re.search(r'(\d+)', value)
+    return m.group(1) if m else None
+
+
+# -------- Load all TXT files --------
+
+def load_txt_data():
+
+    uuid_map = {}
+    number_map = {}
 
     for file in BASE_PATH.rglob("*.txt"):
-        try:
-            with file.open("r", errors="ignore") as f:
-                for lineno, line in enumerate(f, start=1):
-                    line = line.strip()
-                    parts = line.split()
 
-                    if len(parts) >= 2:
-                        u = parts[0]
+        with file.open(errors="ignore") as f:
 
-                        if u in uuids and parts[-1].startswith("tcp://"):
-                            found.add(u)
+            for line in f:
 
-                            results.append(
-                                Device(
-                                    uuid=u,
-                                    tcp_url=parts[-1],
-                                    source_file=str(file.relative_to(BASE_PATH)),
-                                    line_number=lineno
-                                )
-                            )
-        except Exception:
-            continue
+                parts = line.strip().split()
 
-    unmatched = list(uuids - found)
+                if len(parts) >= 2:
 
-    return results, unmatched
+                    uuid = parts[0].strip().upper()
+                    url = parts[-1].strip()
 
+                    if url.startswith("tcp://"):
 
-# -------- SEARCH API --------
+                        uuid_map[uuid] = url
 
-@app.get("/api/devices")
-def get_devices(uuid: str = Query(...)):
-    uuid_set = {u.strip() for u in uuid.split(",") if u.strip()}
-    results, unmatched = search_uuids(uuid_set)
+                        number = extract_number(uuid)
 
-    return {
-        "matched": results,
-        "unmatched": unmatched
-    }
+                        if number:
+                            number_map[number] = (uuid, url)
 
-
-# -------- CSV UPLOAD --------
-
-@app.post("/api/upload")
-async def upload_csv(file: UploadFile = File(...)):
-
-    content = await file.read()
-    lines = content.decode(errors="ignore").splitlines()
-
-    uuid_set = {line.strip() for line in lines if line.strip()}
-
-    results, unmatched = search_uuids(uuid_set)
-
-    # matched CSV
-    matched_file = pathlib.Path("matched_output.csv")
-
-    with matched_file.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["uuid", "tcp_url", "source_file", "line_number"])
-
-        for r in results:
-            writer.writerow([r.uuid, r.tcp_url, r.source_file, r.line_number])
-
-    return {
-        "download": "/download/matched",
-        "unmatched": unmatched
-    }
-
-
-@app.get("/download/matched")
-def download_csv():
-    return FileResponse(
-        "matched_output.csv",
-        media_type="text/csv",
-        filename="output.csv"
-    )
+    return uuid_map, number_map
 
 
 @app.get("/")
-def dashboard():
+def home():
     return FileResponse("static/index.html")
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# -------- Single UUID Search --------
+
+@app.get("/search")
+
+def search(uuid: str = Query(...)):
+
+    uuid_map, number_map = load_txt_data()
+
+    value = uuid.strip().upper()
+
+    # Exact UUID match
+    if value in uuid_map:
+
+        return {
+            "uuid": value,
+            "tcp_url": uuid_map[value],
+            "match_type": "exact"
+        }
+
+    number = extract_number(value)
+
+    # VSPL-140993 type
+    if number and number in number_map:
+
+        correct_uuid, url = number_map[number]
+
+        return {
+            "uuid": correct_uuid,
+            "tcp_url": url,
+            "match_type": "number_match"
+        }
+
+    # Only number search
+    if value.isdigit() and value in number_map:
+
+        correct_uuid, url = number_map[value]
+
+        return {
+            "uuid": correct_uuid,
+            "tcp_url": url,
+            "match_type": "number_only"
+        }
+
+    return {"error": "No Match Found"}
+
+
+# -------- CSV Upload --------
+
+@app.post("/upload")
+
+async def upload(file: UploadFile = File(...)):
+
+    global unmatched_data
+
+    content = await file.read()
+
+    lines = content.decode(errors="ignore").splitlines()
+
+    input_uuids = [l.strip() for l in lines if l.strip()]
+
+    uuid_map, number_map = load_txt_data()
+
+    matched = []
+    unmatched_data = []
+
+    for u in input_uuids:
+
+        key = u.upper()
+
+        if key in uuid_map:
+
+            number = extract_number(u)
+
+            matched.append([u, number, uuid_map[key]])
+
+        else:
+
+            number = extract_number(u)
+
+            unmatched_data.append([u, number])
+
+    with open("matched.csv", "w", newline="") as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow(["uuid", "number", "tcp_url"])
+
+        writer.writerows(matched)
+
+    return JSONResponse({
+        "matched": len(matched),
+        "unmatched": unmatched_data
+    })
+
+
+# -------- Download Matched CSV --------
+
+@app.get("/download-matched")
+
+def download():
+
+    return FileResponse("matched.csv", filename="matched.csv")
+
+
+# -------- Generate Unmatched CSV --------
+
+@app.get("/generate-unmatched")
+
+def generate_unmatched():
+
+    uuid_map, number_map = load_txt_data()
+
+    result = []
+
+    for uuid, number in unmatched_data:
+
+        if number in number_map:
+
+            correct_uuid, url = number_map[number]
+
+            result.append([correct_uuid, number, url])
+
+        else:
+
+            result.append([uuid, number, "NOT_FOUND"])
+
+    with open("unmatched.csv", "w", newline="") as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow(["uuid", "number", "tcp_url"])
+
+        writer.writerows(result)
+
+    return FileResponse("unmatched.csv", filename="unmatched.csv")
