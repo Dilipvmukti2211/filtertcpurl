@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>UUID → TCP URL</title>
+
+<style>
+body { background:#020617; color:#e5e7eb; font-family:Arial; padding:40px }
+textarea,input { width:420px; padding:10px; border-radius:6px }
+button { padding:10px 18px; background:#38bdf8; border:none; font-weight:bold; cursor:pointer }
+.box { margin-top:25px; border:1px solid #1e293b; padding:20px }
+.tcp { color:#22c55e; font-weight:bold }
+.bad { color:#ef4444 }
+</style>
+</head>
+
+<body>
+
+<h2>UUID → TCP URL Finder</h2>
+
+<h4>Multiple UUID</h4>
+
+<textarea id="uuid" rows="4"
+placeholder="VSPL-149578-ROFHQ
+SSAC-349670-DDEDD"></textarea><br><br>
+
+<button onclick="search()">Search</button>
+
+<h4 style="margin-top:30px">Upload CSV</h4>
+
+<input type="file" id="csv">
+<button onclick="upload()">Upload CSV</button>
+
+<div id="result" class="box"></div>
+
+<script>
+
+async function search() {
+
+const val = document.getElementById("uuid").value.trim()
+
+if(!val) return alert("UUID required")
+
+const q = encodeURIComponent(val.replace(/\n/g,","))
+
+const res = await fetch(`/api/devices?uuid=${q}`)
+const data = await res.json()
+
+let html = ""
+
+if(data.matched.length){
+
+html += "<h3>✅ Matched</h3>"
+
+data.matched.forEach(d=>{
+html += `<div class="tcp">${d.uuid} → ${d.tcp_url}</div>`
+})
+
+}else{
+
+html += "❌ No matched UUID<br>"
+
+}
+
+if(data.unmatched.length){
+
+html += "<h3 style='margin-top:20px'>❌ Not Found</h3>"
+
+data.unmatched.forEach(u=>{
+html += `<div class="bad">${u}</div>`
+})
+
+}
+
+document.getElementById("result").innerHTML = html
+
+}
+
+
+
+async function upload(){
+
+const file = document.getElementById("csv").files[0]
+
+if(!file) return alert("Select CSV file")
+
+const form = new FormData()
+
+form.append("file",file)
+
+const res = await fetch("/api/upload",{method:"POST",body:form})
+
+const data = await res.json()
+
+let html=""
+
+if(data.unmatched.length){
+
+html+="<h3>❌ Not Found</h3>"
+
+data.unmatched.forEach(u=>{
+html+=`<div class="bad">${u}</div>`
+})
+
+}
+
+html+=`<br><br>
+<a href="${data.download}">
+<button>Download Matched CSV</button>
+</a>
+`
+
+document.getElementById("result").innerHTML=html
+
+}
+
+</script>
+
+</body>
+</html>
